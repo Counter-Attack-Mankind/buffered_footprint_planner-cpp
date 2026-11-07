@@ -23,6 +23,101 @@ struct HalfspaceObstacle {
   common::math::Vec2d center;
 };
 
+common::math::Vec2d ClosestPointOnSegment(
+    const common::math::Vec2d& point, const common::math::Vec2d& first,
+    const common::math::Vec2d& second) {
+  const double dx = second.x() - first.x();
+  const double dy = second.y() - first.y();
+  const double length_squared = dx * dx + dy * dy;
+  if (length_squared <= 1e-20) return first;
+  const double ratio = std::clamp(
+      ((point.x() - first.x()) * dx + (point.y() - first.y()) * dy) /
+          length_squared,
+      0.0, 1.0);
+  return {first.x() + ratio * dx, first.y() + ratio * dy};
+}
+
+double ClosestPolygonPoints(
+    const std::array<common::math::Vec2d, 4>& body,
+    const common::math::Polygon2d& obstacle,
+    common::math::Vec2d* body_point, common::math::Vec2d* obstacle_point) {
+  double best = std::numeric_limits<double>::infinity();
+  const auto& points = obstacle.points();
+  auto consider = [&](const common::math::Vec2d& first,
+                      const common::math::Vec2d& second) {
+    const double distance = first.DistanceTo(second);
+    if (distance < best) {
+      best = distance;
+      *body_point = first;
+      *obstacle_point = second;
+    }
+  };
+  for (const auto& corner : body) {
+    for (std::size_t edge = 0; edge < points.size(); ++edge) {
+      consider(corner, ClosestPointOnSegment(
+                           corner, points[edge], points[(edge + 1) % points.size()]));
+    }
+  }
+  for (const auto& point : points) {
+    for (std::size_t edge = 0; edge < body.size(); ++edge) {
+      const auto closest = ClosestPointOnSegment(
+          point, body[edge], body[(edge + 1) % body.size()]);
+      consider(closest, point);
+    }
+  }
+  return best;
+}
+
+std::array<double, 4> RepresentDirection(
+    const HalfspaceObstacle& obstacle, const common::math::Vec2d& boundary_point,
+    double qx, double qy) {
+  std::array<double, 4> best{};
+  double best_score = std::numeric_limits<double>::infinity();
+  auto score = [&](const std::array<double, 4>& candidate) {
+    double represented_x = 0.0, represented_y = 0.0, support = 0.0;
+    for (std::size_t edge = 0; edge < 4; ++edge) {
+      represented_x += obstacle.a[edge][0] * candidate[edge];
+      represented_y += obstacle.a[edge][1] * candidate[edge];
+      support += obstacle.b[edge] * candidate[edge];
+    }
+    const double residual = std::hypot(represented_x - qx,
+                                       represented_y - qy);
+    const double support_error = std::abs(
+        support - qx * boundary_point.x() - qy * boundary_point.y());
+    const double current_score = support_error + 1000.0 * residual;
+    if (current_score < best_score) {
+      best_score = current_score;
+      best = candidate;
+    }
+  };
+  for (std::size_t edge = 0; edge < 4; ++edge) {
+    std::array<double, 4> candidate{};
+    candidate[edge] = std::max(
+        0.0, obstacle.a[edge][0] * qx + obstacle.a[edge][1] * qy);
+    score(candidate);
+  }
+  for (std::size_t first = 0; first < 4; ++first) {
+    for (std::size_t second = first + 1; second < 4; ++second) {
+      const double determinant =
+          obstacle.a[first][0] * obstacle.a[second][1] -
+          obstacle.a[second][0] * obstacle.a[first][1];
+      if (std::abs(determinant) <= 1e-12) continue;
+      const double first_coefficient =
+          (qx * obstacle.a[second][1] - qy * obstacle.a[second][0]) /
+          determinant;
+      const double second_coefficient =
+          (obstacle.a[first][0] * qy - obstacle.a[first][1] * qx) /
+          determinant;
+      if (first_coefficient < -1e-10 || second_coefficient < -1e-10) continue;
+      std::array<double, 4> candidate{};
+      candidate[first] = std::max(0.0, first_coefficient);
+      candidate[second] = std::max(0.0, second_coefficient);
+      score(candidate);
+    }
+  }
+  return best;
+}
+
 std::vector<HalfspaceObstacle> BuildHalfspaces(
     const std::vector<common::math::Polygon2d>& obstacles) {
   std::vector<HalfspaceObstacle> result;
@@ -61,6 +156,14 @@ std::string GenericToString(const casadi::GenericType& value) {
 
 double PositiveViolation(double value) { return std::max(0.0, value); }
 
+void RecordMaximum(double value, const std::string& location,
+                   double* maximum, std::string* maximum_location) {
+  if (value > *maximum) {
+    *maximum = value;
+    *maximum_location = location;
+  }
+}
+
 }  // namespace
 
 OptimizationResult SolveFootprintNlp(
@@ -69,6 +172,13 @@ OptimizationResult SolveFootprintNlp(
     const std::array<double, 4>& bounds,
     const FootprintNlpConfig& config) {
   OptimizationResult result;
+  result.initial_guess_succeeded = true;
+  result.configured_max_iterations = config.max_iterations;
+  result.configured_max_cpu_time = config.max_cpu_time;
+  result.configured_tolerance = config.tolerance;
+  result.configured_linear_solver = config.linear_solver;
+  result.configured_hessian_approximation = "limited-memory";
+  result.configured_mu_strategy = "adaptive";
   if (initial.nodes.size() < 2 ||
       initial.intervals.size() + 1 != initial.nodes.size()) {
     result.status = "Invalid initial trajectory dimensions";
@@ -241,23 +351,34 @@ OptimizationResult SolveFootprintNlp(
   for (std::size_t i = 0; i < interval_count; ++i) {
     const double c = std::cos(initial.nodes[i].theta);
     const double s = std::sin(initial.nodes[i].theta);
+    const auto initial_footprint = ComputeEmbodiedFootprint(
+        initial.nodes[i], initial.intervals[i].dt, vehicle);
     for (std::size_t obstacle = 0; obstacle < obstacle_count; ++obstacle) {
       const std::size_t column = i * obstacle_count + obstacle;
-      double qx = initial.nodes[i].x - halfspaces[obstacle].center.x();
-      double qy = initial.nodes[i].y - halfspaces[obstacle].center.y();
-      const double norm = std::hypot(qx, qy);
+      common::math::Vec2d body_point;
+      common::math::Vec2d obstacle_point;
+      const double distance = ClosestPolygonPoints(
+          initial_footprint.corners, obstacles[obstacle],
+          &body_point, &obstacle_point);
+      double qx = body_point.x() - obstacle_point.x();
+      double qy = body_point.y() - obstacle_point.y();
+      double norm = std::hypot(qx, qy);
       if (norm > 1e-9) { qx /= norm; qy /= norm; } else { qx = 1.0; qy = 0.0; }
-      for (std::size_t edge = 0; edge < 4; ++edge) {
-        lambda_initial(edge, column) = std::max(
-            0.0, halfspaces[obstacle].a[edge][0] * qx +
-                     halfspaces[obstacle].a[edge][1] * qy);
-      }
+      auto lambda_values = RepresentDirection(
+          halfspaces[obstacle], obstacle_point, qx, qy);
       const double longitudinal = c * qx + s * qy;
       const double lateral = -s * qx + c * qy;
-      mu_initial(0, column) = std::max(-longitudinal, 0.0);
-      mu_initial(1, column) = std::max(longitudinal, 0.0);
-      mu_initial(2, column) = std::max(-lateral, 0.0);
-      mu_initial(3, column) = std::max(lateral, 0.0);
+      std::array<double, 4> mu_values{{
+          std::max(-longitudinal, 0.0), std::max(longitudinal, 0.0),
+          std::max(-lateral, 0.0), std::max(lateral, 0.0)}};
+      const double rho = distance > 0.0
+                             ? std::min(1.0, std::max(
+                                   0.25, (config.dmin + 1e-3) / distance))
+                             : 1.0;
+      for (std::size_t edge = 0; edge < 4; ++edge) {
+        lambda_initial(edge, column) = rho * lambda_values[edge];
+        mu_initial(edge, column) = rho * mu_values[edge];
+      }
     }
   }
   opti.set_initial(lambda, lambda_initial);
@@ -302,12 +423,18 @@ OptimizationResult SolveFootprintNlp(
       node.a = static_cast<double>(state_value(4, i));
       node.phy = static_cast<double>(state_value(5, i));
       node.w = static_cast<double>(state_value(6, i));
-      result.max_variable_bound_violation = std::max({
-          result.max_variable_bound_violation,
-          PositiveViolation(std::abs(node.v) - vehicle.v_max),
-          PositiveViolation(std::abs(node.a) - vehicle.a_max),
-          PositiveViolation(std::abs(node.phy) - vehicle.delta_max),
-          PositiveViolation(std::abs(node.w) - vehicle.omega_max)});
+      const std::array<std::pair<const char*, double>, 4> variable_violations{{
+          {"v", PositiveViolation(std::abs(node.v) - vehicle.v_max)},
+          {"a", PositiveViolation(std::abs(node.a) - vehicle.a_max)},
+          {"phy", PositiveViolation(std::abs(node.phy) - vehicle.delta_max)},
+          {"w", PositiveViolation(std::abs(node.w) - vehicle.omega_max)}}};
+      result.variable_bound_check_count += variable_violations.size();
+      for (const auto& violation : variable_violations) {
+        RecordMaximum(violation.second,
+                      "node=" + std::to_string(i) + ",variable=" + violation.first,
+                      &result.max_variable_bound_violation,
+                      &result.max_variable_bound_location);
+      }
     }
     for (std::size_t i = 0; i < interval_count; ++i) {
       const double interval_dt = static_cast<double>(dt_value(i));
@@ -315,26 +442,46 @@ OptimizationResult SolveFootprintNlp(
           result.trajectory.nodes[i], interval_dt, vehicle);
       footprint.gear = initial.intervals[i].gear;
       result.trajectory.intervals[i] = footprint;
-      result.max_footprint_validity_violation = std::max(
-          result.max_footprint_validity_violation,
-          EvaluateFootprintValidity(footprint, vehicle).max_violation());
+      const auto footprint_validity = EvaluateFootprintValidity(footprint, vehicle);
+      result.footprint_validity_check_count += 5;
+      RecordMaximum(footprint_validity.max_violation(),
+                    "interval=" + std::to_string(i),
+                    &result.max_footprint_validity_violation,
+                    &result.max_footprint_validity_location);
       const auto& first = result.trajectory.nodes[i];
       const auto& second = result.trajectory.nodes[i + 1];
-      result.max_dynamics_residual = std::max({
-          result.max_dynamics_residual,
+      const std::array<double, 5> dynamics{{
           std::abs(second.x - first.x - first.v * interval_dt * std::cos(first.theta)),
           std::abs(second.y - first.y - first.v * interval_dt * std::sin(first.theta)),
           std::abs(second.v - first.v - interval_dt * first.a),
           std::abs(second.theta - first.theta - interval_dt * first.v *
                        std::tan(first.phy) / vehicle.wheel_base),
-          std::abs(second.phy - first.phy - interval_dt * first.w)});
-      for (const auto& corner : footprint.corners) {
-        result.max_map_boundary_violation = std::max({
-            result.max_map_boundary_violation,
+          std::abs(second.phy - first.phy - interval_dt * first.w)}};
+      result.dynamics_check_count += dynamics.size();
+      for (std::size_t equation = 0; equation < dynamics.size(); ++equation) {
+        RecordMaximum(dynamics[equation],
+                      "interval=" + std::to_string(i) +
+                          ",equation=" + std::to_string(equation),
+                      &result.max_dynamics_residual,
+                      &result.max_dynamics_location);
+      }
+      for (std::size_t corner_index = 0;
+           corner_index < footprint.corners.size(); ++corner_index) {
+        const auto& corner = footprint.corners[corner_index];
+        const std::array<double, 4> boundary_violations{{
             PositiveViolation(bounds[0] - corner.x()),
             PositiveViolation(corner.x() - bounds[1]),
             PositiveViolation(bounds[2] - corner.y()),
-            PositiveViolation(corner.y() - bounds[3])});
+            PositiveViolation(corner.y() - bounds[3])}};
+        result.map_boundary_check_count += boundary_violations.size();
+        for (std::size_t side = 0; side < boundary_violations.size(); ++side) {
+          RecordMaximum(boundary_violations[side],
+                        "interval=" + std::to_string(i) +
+                            ",corner=" + std::to_string(corner_index) +
+                            ",side=" + std::to_string(side),
+                        &result.max_map_boundary_violation,
+                        &result.max_map_boundary_location);
+        }
       }
       for (std::size_t obstacle = 0; obstacle < obstacle_count; ++obstacle) {
         const std::size_t column = i * obstacle_count + obstacle;
@@ -352,22 +499,29 @@ OptimizationResult SolveFootprintNlp(
                        (rear + footprint.down) * static_cast<double>(mu_value(1, column)) +
                        (half_width + footprint.left) * static_cast<double>(mu_value(2, column)) +
                        (half_width + footprint.right) * static_cast<double>(mu_value(3, column));
-        result.max_obca_violation = std::max(
-            result.max_obca_violation,
-            PositiveViolation(config.dmin - certificate));
-        result.max_obca_violation = std::max(
-            result.max_obca_violation,
-            PositiveViolation(qx * qx + qy * qy - 1.0));
+        result.obca_check_count += 4;
+        RecordMaximum(PositiveViolation(config.dmin - certificate),
+                      "interval=" + std::to_string(i) + ",obstacle=" +
+                          std::to_string(obstacle) + ",constraint=distance",
+                      &result.max_obca_violation, &result.max_obca_location);
+        RecordMaximum(PositiveViolation(qx * qx + qy * qy - 1.0),
+                      "interval=" + std::to_string(i) + ",obstacle=" +
+                          std::to_string(obstacle) + ",constraint=norm",
+                      &result.max_obca_violation, &result.max_obca_location);
         const double longitudinal = std::cos(first.theta) * qx +
                                     std::sin(first.theta) * qy;
         const double lateral = -std::sin(first.theta) * qx +
                                std::cos(first.theta) * qy;
-        result.max_obca_violation = std::max({
-            result.max_obca_violation,
-            std::abs(static_cast<double>(mu_value(0, column)) -
-                     static_cast<double>(mu_value(1, column)) + longitudinal),
-            std::abs(static_cast<double>(mu_value(2, column)) -
-                     static_cast<double>(mu_value(3, column)) + lateral)});
+        RecordMaximum(std::abs(static_cast<double>(mu_value(0, column)) -
+                               static_cast<double>(mu_value(1, column)) + longitudinal),
+                      "interval=" + std::to_string(i) + ",obstacle=" +
+                          std::to_string(obstacle) + ",constraint=dual_x",
+                      &result.max_obca_violation, &result.max_obca_location);
+        RecordMaximum(std::abs(static_cast<double>(mu_value(2, column)) -
+                               static_cast<double>(mu_value(3, column)) + lateral),
+                      "interval=" + std::to_string(i) + ",obstacle=" +
+                          std::to_string(obstacle) + ",constraint=dual_y",
+                      &result.max_obca_violation, &result.max_obca_location);
       }
     }
     const double residual_limit = std::max(1e-4, 10.0 * config.tolerance);
@@ -439,6 +593,7 @@ bool SaveOptimizationResults(const std::string& result_directory,
   }
   std::ofstream summary(fs::path(result_directory) / "solver_summary.txt");
   summary << std::boolalpha
+          << "initial_guess_succeeded=" << result.initial_guess_succeeded << '\n'
           << "solver_succeeded=" << result.solver_succeeded << '\n'
           << "validated_success=" << result.success << '\n'
           << "status=" << result.status << '\n'
@@ -450,7 +605,101 @@ bool SaveOptimizationResults(const std::string& result_directory,
           << "max_footprint_validity_violation=" << result.max_footprint_validity_violation << '\n'
           << "max_obca_violation=" << result.max_obca_violation << '\n'
           << "max_map_boundary_violation=" << result.max_map_boundary_violation << '\n';
+  summary << "dynamics_check_count=" << result.dynamics_check_count << '\n'
+          << "max_dynamics_location=" << result.max_dynamics_location << '\n'
+          << "variable_bound_check_count=" << result.variable_bound_check_count << '\n'
+          << "max_variable_bound_location=" << result.max_variable_bound_location << '\n'
+          << "footprint_validity_check_count=" << result.footprint_validity_check_count << '\n'
+          << "max_footprint_validity_location=" << result.max_footprint_validity_location << '\n'
+          << "obca_check_count=" << result.obca_check_count << '\n'
+          << "max_obca_location=" << result.max_obca_location << '\n'
+          << "map_boundary_check_count=" << result.map_boundary_check_count << '\n'
+          << "max_map_boundary_location=" << result.max_map_boundary_location << '\n'
+          << "ipopt_max_iter=" << result.configured_max_iterations << '\n'
+          << "ipopt_max_cpu_time_s=" << result.configured_max_cpu_time << '\n'
+          << "ipopt_tolerance=" << result.configured_tolerance << '\n'
+          << "ipopt_linear_solver=" << result.configured_linear_solver << '\n'
+          << "ipopt_hessian_approximation="
+          << result.configured_hessian_approximation << '\n'
+          << "ipopt_mu_strategy=" << result.configured_mu_strategy << '\n'
+          << "matlab_interface=AMPL_IPOPT\n"
+          << "cpp_interface=CasADi_Opti_IPOPT\n";
   return static_cast<bool>(footprints) && static_cast<bool>(summary);
+}
+
+bool WriteCollisionValidation(
+    const std::string& output_file, const Trajectory& trajectory,
+    const VehicleParameter& vehicle,
+    const std::vector<common::math::Polygon2d>& obstacles,
+    const std::array<double, 4>& bounds, std::string* error) {
+  std::ofstream stream(output_file);
+  if (!stream) {
+    if (error) *error = "Cannot create collision validation report";
+    return false;
+  }
+  constexpr double evaluation_dt = 0.01;
+  std::size_t frames = 0;
+  std::size_t collision_frames = 0;
+  std::size_t boundary_violation_frames = 0;
+  double minimum_obstacle_distance = std::numeric_limits<double>::infinity();
+  double maximum_boundary_violation = 0.0;
+  if (trajectory.nodes.size() >= 2 &&
+      trajectory.intervals.size() + 1 == trajectory.nodes.size()) {
+    for (std::size_t i = 0; i < trajectory.intervals.size(); ++i) {
+      const double dt = trajectory.intervals[i].dt;
+      const std::size_t subdivisions = std::max<std::size_t>(
+          1, static_cast<std::size_t>(std::ceil(dt / evaluation_dt)));
+      const std::size_t first_sample = i == 0 ? 0 : 1;
+      for (std::size_t sample = first_sample; sample <= subdivisions; ++sample) {
+        const double ratio = static_cast<double>(sample) /
+                             static_cast<double>(subdivisions);
+        const auto& first = trajectory.nodes[i];
+        const auto& second = trajectory.nodes[i + 1];
+        const double x = first.x + ratio * (second.x - first.x);
+        const double y = first.y + ratio * (second.y - first.y);
+        const double theta = first.theta + ratio *
+                             (second.theta - first.theta);
+        const auto box = vehicle.GenerateBox(common::math::Pose(x, y, theta));
+        const common::math::Polygon2d body(box);
+        bool collision = false;
+        for (const auto& obstacle : obstacles) {
+          const double distance = body.DistanceTo(obstacle);
+          minimum_obstacle_distance = std::min(minimum_obstacle_distance,
+                                                distance);
+          if (body.HasOverlap(obstacle)) collision = true;
+        }
+        bool outside = false;
+        for (const auto& corner : box.corners()) {
+          const double violation = std::max({
+              0.0, bounds[0] - corner.x(), corner.x() - bounds[1],
+              bounds[2] - corner.y(), corner.y() - bounds[3]});
+          maximum_boundary_violation = std::max(maximum_boundary_violation,
+                                                 violation);
+          outside = outside || violation > 0.0;
+        }
+        ++frames;
+        if (collision) ++collision_frames;
+        if (outside) ++boundary_violation_frames;
+      }
+    }
+  }
+  if (!std::isfinite(minimum_obstacle_distance)) {
+    minimum_obstacle_distance = 0.0;
+  }
+  stream << std::setprecision(12) << std::boolalpha
+         << "sampling_frequency_hz=100\n"
+         << "sampling_period_s=" << evaluation_dt << '\n'
+         << "sample_frames=" << frames << '\n'
+         << "collision_frames=" << collision_frames << '\n'
+         << "collision_ratio="
+         << (frames ? static_cast<double>(collision_frames) / frames : 0.0) << '\n'
+         << "minimum_obstacle_distance_m=" << minimum_obstacle_distance << '\n'
+         << "boundary_violation_frames=" << boundary_violation_frames << '\n'
+         << "maximum_boundary_violation_m=" << maximum_boundary_violation << '\n'
+         << "passed=" << (frames > 0 && collision_frames == 0 &&
+                           boundary_violation_frames == 0) << '\n'
+         << "continuous_time_safety_proof=false\n";
+  return static_cast<bool>(stream);
 }
 
 }  // namespace optimizer

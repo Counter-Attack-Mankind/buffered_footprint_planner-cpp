@@ -32,4 +32,10 @@ bool SaveOptimizationResults(const std::string& result_directory,
                              const OptimizationResult& result,
                              std::string* error);
 
+bool WriteCollisionValidation(
+    const std::string& output_file, const Trajectory& trajectory,
+    const VehicleParameter& vehicle,
+    const std::vector<common::math::Polygon2d>& obstacles,
+    const std::array<double, 4>& bounds, std::string* error);
+
 }  // namespace optimizer

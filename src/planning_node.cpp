@@ -340,17 +340,53 @@ class PlanningNode {
   void RunOptimization(const PlanningSnapshot& snapshot,
                        const planning::HybridAStartResult& hybrid_result) {
     optimizer::Trajectory initial;
+    optimizer::InitialGuessDiagnostics initial_diagnostics;
     std::string error;
     optimizer::OptimizationResult optimized;
     const std::string output_directory = NewResultDirectory();
+    std::error_code directory_error;
+    std::filesystem::create_directories(output_directory, directory_error);
+    if (directory_error) {
+      ROS_ERROR("Cannot create task result directory: %s",
+                directory_error.message().c_str());
+      return;
+    }
     if (!optimizer::BuildInitialGuess(hybrid_result, snapshot.vehicle,
-                                      initial_config_, &initial, &error)) {
+                                      initial_config_, &initial,
+                                      &initial_diagnostics, &error)) {
+      std::string diagnostics_error;
+      optimizer::SaveInitialGuessDiagnostics(
+          output_directory + "/initial_guess_diagnostics.txt",
+          initial_diagnostics, &diagnostics_error);
       optimized.status = "Initial guess failed: " + error;
       optimizer::SaveOptimizationResults(output_directory, initial, optimized,
                                          &error);
       ROS_ERROR("NLP initial guess failed: %s; results: %s",
                 optimized.status.c_str(), output_directory.c_str());
       return;
+    }
+    std::string diagnostics_error;
+    if (!optimizer::SaveInitialGuessDiagnostics(
+            output_directory + "/initial_guess_diagnostics.txt",
+            initial_diagnostics, &diagnostics_error)) {
+      ROS_WARN("Cannot save initial-guess diagnostics: %s",
+               diagnostics_error.c_str());
+    }
+    optimizer::OptimizationResult pending_result;
+    pending_result.initial_guess_succeeded = true;
+    pending_result.status = "NLP solve started; no terminal status recorded yet";
+    pending_result.configured_max_iterations = nlp_config_.max_iterations;
+    pending_result.configured_max_cpu_time = nlp_config_.max_cpu_time;
+    pending_result.configured_tolerance = nlp_config_.tolerance;
+    pending_result.configured_linear_solver = nlp_config_.linear_solver;
+    pending_result.configured_hessian_approximation = "limited-memory";
+    pending_result.configured_mu_strategy = "adaptive";
+    std::string pending_save_error;
+    if (!optimizer::SaveOptimizationResults(output_directory, initial,
+                                             pending_result,
+                                             &pending_save_error)) {
+      ROS_WARN("Cannot save pre-solve task snapshot: %s",
+               pending_save_error.c_str());
     }
 
     ROS_INFO("Starting embodied-footprint NLP: %zu nodes, %zu obstacles",
@@ -362,6 +398,14 @@ class PlanningNode {
     if (!optimizer::SaveOptimizationResults(output_directory, initial,
                                              optimized, &save_error)) {
       ROS_ERROR("Cannot save NLP results: %s", save_error.c_str());
+    }
+    std::string collision_error;
+    if (!optimizer::WriteCollisionValidation(
+            output_directory + "/collision_validation.txt",
+            optimized.trajectory, snapshot.vehicle, snapshot.obstacles,
+            snapshot.bounds, &collision_error)) {
+      ROS_ERROR("Cannot save collision validation: %s",
+                collision_error.c_str());
     }
     if (!optimized.success) {
       ROS_ERROR("Embodied-footprint NLP rejected: %s (%.3f s); results: %s",
