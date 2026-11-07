@@ -181,6 +181,7 @@ class SimulationNode {
     VisualizationPlot::ClearMarkers("planning_goal_point", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_label", 0, 0);
     VisualizationPlot::ClearMarkers("hybrid_astar_path", 0, 0);
+    VisualizationPlot::ClearMarkers("optimized_trajectory", 0, 1023);
   }
 
   void BeginEditing() {

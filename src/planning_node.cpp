@@ -1,7 +1,12 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -19,6 +24,9 @@
 #include "hybrid_astar/hybrid_a_star.h"
 #include "hybrid_astar/parking_planner_config.h"
 #include "hybrid_astar/vehicle_parameter.h"
+#include "optimizer/embodied_footprint.h"
+#include "optimizer/footprint_nlp.h"
+#include "optimizer/initial_guess.h"
 #include "visualize/visualization_plot.h"
 
 namespace {
@@ -47,12 +55,28 @@ class PlanningNode {
   PlanningNode() : private_node_("~") {}
 
   bool Initialize() {
-    if (!scenario_.Load(private_node_) || !LoadVehicle() || !LoadPlanner()) {
+    if (!scenario_.Load(private_node_) || !LoadVehicle() || !LoadPlanner() ||
+        !LoadOptimizer()) {
       return false;
     }
     private_node_.param("vehicle/id", vehicle_id_, std::string("vehicle_1"));
     VisualizationPlot::Init(private_node_, scenario_.frame_id(),
                             "/buffered_footprint_planner/markers");
+    std::error_code directory_error;
+    std::filesystem::create_directories(results_directory_, directory_error);
+    if (directory_error) {
+      ROS_ERROR("Cannot create optimizer results directory '%s': %s",
+                results_directory_.c_str(), directory_error.message().c_str());
+      return false;
+    }
+    std::string validation_error;
+    if (!optimizer::WriteGeometryValidation(
+            vehicle_, results_directory_ + "/geometry_validation.csv",
+            &validation_error)) {
+      ROS_ERROR("Cannot write geometry validation: %s",
+                validation_error.c_str());
+      return false;
+    }
     command_client_ = private_node_.serviceClient<
         buffered_footprint_planner::SetObjectPose>(
         "/simulation/set_object_pose");
@@ -117,6 +141,38 @@ class PlanningNode {
     planner_.next_node_num = static_cast<std::size_t>(next_node_num);
     planner_.explore_node_num = static_cast<std::size_t>(explore_node_num);
     planner_.xy_bounds = scenario_.bounds();
+    return true;
+  }
+
+  bool LoadOptimizer() {
+    private_node_.param("min_dt", initial_config_.min_dt, 0.02);
+    private_node_.param("max_dt", initial_config_.max_dt, 0.25);
+    private_node_.param("temporal_tightening_eta", initial_config_.eta, 0.90);
+    private_node_.param("max_velocity", initial_config_.forward_speed, 0.20);
+    private_node_.param("max_reverse_velocity", initial_config_.reverse_speed,
+                        0.16);
+    initial_config_.max_acceleration = vehicle_.a_max;
+    initial_config_.max_steering_rate = vehicle_.omega_max;
+
+    nlp_config_.min_dt = initial_config_.min_dt;
+    nlp_config_.max_dt = initial_config_.max_dt;
+    private_node_.param("dmin", nlp_config_.dmin, 0.005);
+    private_node_.param("total_time_limit", nlp_config_.total_time_limit, 35.0);
+    private_node_.param("ipopt_max_iterations", nlp_config_.max_iterations, 500);
+    private_node_.param("ipopt_max_cpu_time", nlp_config_.max_cpu_time, 60.0);
+    private_node_.param("ipopt_tolerance", nlp_config_.tolerance, 1e-5);
+    private_node_.param("ipopt_linear_solver", nlp_config_.linear_solver,
+                        std::string("mumps"));
+    private_node_.param("results_directory", results_directory_,
+                        std::string("results"));
+    std::string geometry_error;
+    if (initial_config_.forward_speed <= 0.0 ||
+        initial_config_.reverse_speed <= 0.0 || nlp_config_.dmin <= 0.0 ||
+        nlp_config_.max_cpu_time <= 0.0 ||
+        !optimizer::CheckVehicleGeometryCondition(vehicle_, &geometry_error)) {
+      ROS_ERROR("Invalid optimizer configuration: %s", geometry_error.c_str());
+      return false;
+    }
     return true;
   }
 
@@ -226,6 +282,7 @@ class PlanningNode {
 
     QueueGoal(goal);
     VisualizationPlot::ClearMarkers("hybrid_astar_path", 0, 0);
+    VisualizationPlot::ClearMarkers("optimized_trajectory", 0, 1023);
     VisualizationPlot::Trigger();
 
     planning::HybridAStar planner(snapshot.planner, snapshot.vehicle,
@@ -258,10 +315,89 @@ class PlanningNode {
                "gear switches=%zu, %.3f s",
                result.x.size(), length, has_reverse ? "yes" : "no",
                gear_switches, elapsed);
+      RunOptimization(snapshot, result);
     } else {
       ROS_WARN("Hybrid A* failed after %.3f s; scene remains unchanged", elapsed);
     }
     FinishPlanningLock();
+  }
+
+  std::string NewResultDirectory() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_time{};
+#ifdef _WIN32
+    localtime_s(&local_time, &time);
+#else
+    localtime_r(&time, &local_time);
+#endif
+    std::ostringstream name;
+    name << std::put_time(&local_time, "%Y%m%d_%H%M%S") << "_task_"
+         << std::setw(3) << std::setfill('0') << ++task_counter_;
+    return (std::filesystem::path(results_directory_) / name.str()).string();
+  }
+
+  void RunOptimization(const PlanningSnapshot& snapshot,
+                       const planning::HybridAStartResult& hybrid_result) {
+    optimizer::Trajectory initial;
+    std::string error;
+    optimizer::OptimizationResult optimized;
+    const std::string output_directory = NewResultDirectory();
+    if (!optimizer::BuildInitialGuess(hybrid_result, snapshot.vehicle,
+                                      initial_config_, &initial, &error)) {
+      optimized.status = "Initial guess failed: " + error;
+      optimizer::SaveOptimizationResults(output_directory, initial, optimized,
+                                         &error);
+      ROS_ERROR("NLP initial guess failed: %s; results: %s",
+                optimized.status.c_str(), output_directory.c_str());
+      return;
+    }
+
+    ROS_INFO("Starting embodied-footprint NLP: %zu nodes, %zu obstacles",
+             initial.nodes.size(), snapshot.obstacles.size());
+    optimized = optimizer::SolveFootprintNlp(
+        initial, snapshot.vehicle, snapshot.obstacles, snapshot.bounds,
+        nlp_config_);
+    std::string save_error;
+    if (!optimizer::SaveOptimizationResults(output_directory, initial,
+                                             optimized, &save_error)) {
+      ROS_ERROR("Cannot save NLP results: %s", save_error.c_str());
+    }
+    if (!optimized.success) {
+      ROS_ERROR("Embodied-footprint NLP rejected: %s (%.3f s); results: %s",
+                optimized.status.c_str(), optimized.solve_time,
+                output_directory.c_str());
+      return;
+    }
+
+    VisualizationPlot::ClearMarkers("optimized_trajectory", 0, 1023);
+    std::vector<double> x{optimized.trajectory.nodes.front().x};
+    std::vector<double> y{optimized.trajectory.nodes.front().y};
+    bool forward = optimized.trajectory.intervals.front().gear;
+    int marker_id = 0;
+    for (std::size_t i = 0; i < optimized.trajectory.intervals.size(); ++i) {
+      x.push_back(optimized.trajectory.nodes[i + 1].x);
+      y.push_back(optimized.trajectory.nodes[i + 1].y);
+      const bool segment_finished =
+          i + 1 == optimized.trajectory.intervals.size() ||
+          optimized.trajectory.intervals[i + 1].gear != forward;
+      if (segment_finished) {
+        VisualizationPlot::Plot(x, y, 0.03,
+                                forward ? Color::Blue : Color::Red,
+                                marker_id++, "optimized_trajectory");
+        if (i + 1 < optimized.trajectory.intervals.size()) {
+          x = {optimized.trajectory.nodes[i + 1].x};
+          y = {optimized.trajectory.nodes[i + 1].y};
+          forward = optimized.trajectory.intervals[i + 1].gear;
+        }
+      }
+    }
+    VisualizationPlot::Trigger();
+    ROS_INFO("Embodied-footprint NLP succeeded: status=%s, iterations=%d, "
+             "objective=%.6g, %.3f s; results: %s",
+             optimized.status.c_str(), optimized.iterations,
+             optimized.objective, optimized.solve_time,
+             output_directory.c_str());
   }
 
   void QueueGoal(const Pose2d& goal) const {
@@ -289,6 +425,7 @@ class PlanningNode {
     VisualizationPlot::ClearMarkers("planning_goal_point", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_label", 0, 0);
     VisualizationPlot::ClearMarkers("hybrid_astar_path", 0, 0);
+    VisualizationPlot::ClearMarkers("optimized_trajectory", 0, 1023);
     VisualizationPlot::Trigger();
   }
 
@@ -305,6 +442,10 @@ class PlanningNode {
   ScenarioManager scenario_;
   VehicleParameter vehicle_;
   ParkingPlannerConfig planner_;
+  optimizer::InitialGuessConfig initial_config_;
+  optimizer::FootprintNlpConfig nlp_config_;
+  std::string results_directory_ = "results";
+  std::uint64_t task_counter_ = 0;
   std::string vehicle_id_ = "vehicle_1";
   Pose2d locked_start_;
   bool start_locked_ = false;

@@ -11,6 +11,9 @@
         name="buffered_footprint_planning" output="screen" required="true">
     <rosparam command="load" file="$(find buffered_footprint_planner)/config/env.yaml"/>
     <rosparam command="load" file="$(find buffered_footprint_planner)/config/planner.yaml"/>
+    <rosparam command="load" file="$(find buffered_footprint_planner)/config/optimizer.yaml"/>
+    <param name="results_directory"
+           value="$(find buffered_footprint_planner)/results"/>
   </node>
 
   <node if="$(arg launch_rviz)" pkg="rviz" type="rviz" name="rviz"
