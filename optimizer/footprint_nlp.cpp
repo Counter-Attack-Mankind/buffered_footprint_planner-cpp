@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 #include <casadi/casadi.hpp>
 
@@ -122,16 +123,28 @@ std::vector<HalfspaceObstacle> BuildHalfspaces(
     const std::vector<common::math::Polygon2d>& obstacles) {
   std::vector<HalfspaceObstacle> result;
   result.reserve(obstacles.size());
-  for (const auto& obstacle : obstacles) {
+  for (std::size_t obstacle_index = 0;
+       obstacle_index < obstacles.size(); ++obstacle_index) {
+    const auto& obstacle = obstacles[obstacle_index];
     HalfspaceObstacle halfspace;
     halfspace.center = obstacle.center();
     const auto& points = obstacle.points();
+    if (points.size() != 4) {
+      throw std::invalid_argument(
+          "Obstacle " + std::to_string(obstacle_index) +
+          " must be a convex quadrilateral");
+    }
     for (std::size_t edge = 0; edge < 4; ++edge) {
       const auto& first = points[edge];
       const auto& second = points[(edge + 1) % points.size()];
       double nx = second.y() - first.y();
       double ny = -(second.x() - first.x());
       const double length = std::hypot(nx, ny);
+      if (length <= 1e-12) {
+        throw std::invalid_argument(
+            "Obstacle " + std::to_string(obstacle_index) +
+            " contains a zero-length edge");
+      }
       nx /= length;
       ny /= length;
       double boundary = nx * first.x() + ny * first.y();
@@ -190,11 +203,26 @@ OptimizationResult SolveFootprintNlp(
     return result;
   }
 
+  std::string failure_stage = "NLP model construction";
+  const auto model_begin = std::chrono::steady_clock::now();
+  auto solve_begin = model_begin;
+  try {
+
   using casadi::DM;
   using casadi::MX;
   const std::size_t node_count = initial.nodes.size();
   const std::size_t interval_count = node_count - 1;
   const std::size_t obstacle_count = obstacles.size();
+  const std::size_t obca_column_count = interval_count * obstacle_count;
+  result.model_obstacle_count = obstacle_count;
+  result.model_obca_variable_count = 8 * obca_column_count;
+  result.model_variable_count = 7 * node_count + interval_count +
+                                result.model_obca_variable_count;
+  result.model_constraint_count =
+      2 * interval_count + 1 + 8 * obca_column_count + 14 +
+      8 * node_count + 5 * interval_count + interval_count +
+      5 * interval_count + 16 * interval_count +
+      4 * obca_column_count;
   const double front = vehicle.wheel_base + vehicle.front_hang;
   const double rear = vehicle.rear_hang;
   const double half_width = vehicle.width / 2.0;
@@ -203,14 +231,24 @@ OptimizationResult SolveFootprintNlp(
   casadi::Opti opti;
   MX state = opti.variable(7, node_count);
   MX dt = opti.variable(interval_count);
-  MX lambda = opti.variable(4, interval_count * obstacle_count);
-  MX mu = opti.variable(4, interval_count * obstacle_count);
+  MX lambda;
+  MX mu;
+  if (obstacle_count > 0) {
+    lambda = opti.variable(4, obca_column_count);
+    mu = opti.variable(4, obca_column_count);
+  }
 
-  opti.subject_to(dt >= config.min_dt);
-  opti.subject_to(dt <= config.max_dt);
+  for (std::size_t i = 0; i < interval_count; ++i) {
+    opti.subject_to(dt(i) >= config.min_dt);
+    opti.subject_to(dt(i) <= config.max_dt);
+  }
   opti.subject_to(MX::sum1(dt) <= config.total_time_limit);
-  opti.subject_to(lambda >= 0.0);
-  opti.subject_to(mu >= 0.0);
+  for (std::size_t column = 0; column < obca_column_count; ++column) {
+    for (std::size_t edge = 0; edge < 4; ++edge) {
+      opti.subject_to(lambda(edge, column) >= 0.0);
+      opti.subject_to(mu(edge, column) >= 0.0);
+    }
+  }
 
   MX objective = MX::sumsqr(dt);
   opti.minimize(objective);
@@ -231,14 +269,16 @@ OptimizationResult SolveFootprintNlp(
   opti.subject_to(state(5, last) == 0.0);
   opti.subject_to(state(6, last) == 0.0);
 
-  opti.subject_to(state(3, casadi::Slice()) <= vehicle.v_max);
-  opti.subject_to(state(3, casadi::Slice()) >= -vehicle.v_max);
-  opti.subject_to(state(4, casadi::Slice()) <= vehicle.a_max);
-  opti.subject_to(state(4, casadi::Slice()) >= -vehicle.a_max);
-  opti.subject_to(state(5, casadi::Slice()) <= vehicle.delta_max);
-  opti.subject_to(state(5, casadi::Slice()) >= -vehicle.delta_max);
-  opti.subject_to(state(6, casadi::Slice()) <= vehicle.omega_max);
-  opti.subject_to(state(6, casadi::Slice()) >= -vehicle.omega_max);
+  for (std::size_t i = 0; i < node_count; ++i) {
+    opti.subject_to(state(3, i) <= vehicle.v_max);
+    opti.subject_to(state(3, i) >= -vehicle.v_max);
+    opti.subject_to(state(4, i) <= vehicle.a_max);
+    opti.subject_to(state(4, i) >= -vehicle.a_max);
+    opti.subject_to(state(5, i) <= vehicle.delta_max);
+    opti.subject_to(state(5, i) >= -vehicle.delta_max);
+    opti.subject_to(state(6, i) <= vehicle.omega_max);
+    opti.subject_to(state(6, i) >= -vehicle.omega_max);
+  }
 
   for (std::size_t i = 0; i < interval_count; ++i) {
     const MX x = state(0, i);
@@ -346,43 +386,47 @@ OptimizationResult SolveFootprintNlp(
   opti.set_initial(state, state_initial);
   opti.set_initial(dt, dt_initial);
 
-  DM lambda_initial = DM::zeros(4, interval_count * obstacle_count);
-  DM mu_initial = DM::zeros(4, interval_count * obstacle_count);
-  for (std::size_t i = 0; i < interval_count; ++i) {
-    const double c = std::cos(initial.nodes[i].theta);
-    const double s = std::sin(initial.nodes[i].theta);
-    const auto initial_footprint = ComputeEmbodiedFootprint(
-        initial.nodes[i], initial.intervals[i].dt, vehicle);
-    for (std::size_t obstacle = 0; obstacle < obstacle_count; ++obstacle) {
-      const std::size_t column = i * obstacle_count + obstacle;
-      common::math::Vec2d body_point;
-      common::math::Vec2d obstacle_point;
-      const double distance = ClosestPolygonPoints(
-          initial_footprint.corners, obstacles[obstacle],
-          &body_point, &obstacle_point);
-      double qx = body_point.x() - obstacle_point.x();
-      double qy = body_point.y() - obstacle_point.y();
-      double norm = std::hypot(qx, qy);
-      if (norm > 1e-9) { qx /= norm; qy /= norm; } else { qx = 1.0; qy = 0.0; }
-      auto lambda_values = RepresentDirection(
-          halfspaces[obstacle], obstacle_point, qx, qy);
-      const double longitudinal = c * qx + s * qy;
-      const double lateral = -s * qx + c * qy;
-      std::array<double, 4> mu_values{{
-          std::max(-longitudinal, 0.0), std::max(longitudinal, 0.0),
-          std::max(-lateral, 0.0), std::max(lateral, 0.0)}};
-      const double rho = distance > 0.0
-                             ? std::min(1.0, std::max(
-                                   0.25, (config.dmin + 1e-3) / distance))
-                             : 1.0;
-      for (std::size_t edge = 0; edge < 4; ++edge) {
-        lambda_initial(edge, column) = rho * lambda_values[edge];
-        mu_initial(edge, column) = rho * mu_values[edge];
+  DM lambda_initial;
+  DM mu_initial;
+  if (obstacle_count > 0) {
+    lambda_initial = DM::zeros(4, obca_column_count);
+    mu_initial = DM::zeros(4, obca_column_count);
+    for (std::size_t i = 0; i < interval_count; ++i) {
+      const double c = std::cos(initial.nodes[i].theta);
+      const double s = std::sin(initial.nodes[i].theta);
+      const auto initial_footprint = ComputeEmbodiedFootprint(
+          initial.nodes[i], initial.intervals[i].dt, vehicle);
+      for (std::size_t obstacle = 0; obstacle < obstacle_count; ++obstacle) {
+        const std::size_t column = i * obstacle_count + obstacle;
+        common::math::Vec2d body_point;
+        common::math::Vec2d obstacle_point;
+        const double distance = ClosestPolygonPoints(
+            initial_footprint.corners, obstacles[obstacle],
+            &body_point, &obstacle_point);
+        double qx = body_point.x() - obstacle_point.x();
+        double qy = body_point.y() - obstacle_point.y();
+        const double norm = std::hypot(qx, qy);
+        if (norm > 1e-9) { qx /= norm; qy /= norm; } else { qx = 1.0; qy = 0.0; }
+        auto lambda_values = RepresentDirection(
+            halfspaces[obstacle], obstacle_point, qx, qy);
+        const double longitudinal = c * qx + s * qy;
+        const double lateral = -s * qx + c * qy;
+        std::array<double, 4> mu_values{{
+            std::max(-longitudinal, 0.0), std::max(longitudinal, 0.0),
+            std::max(-lateral, 0.0), std::max(lateral, 0.0)}};
+        const double rho = distance > 0.0
+                               ? std::min(1.0, std::max(
+                                     0.25, (config.dmin + 1e-3) / distance))
+                               : 1.0;
+        for (std::size_t edge = 0; edge < 4; ++edge) {
+          lambda_initial(edge, column) = rho * lambda_values[edge];
+          mu_initial(edge, column) = rho * mu_values[edge];
+        }
       }
     }
+    opti.set_initial(lambda, lambda_initial);
+    opti.set_initial(mu, mu_initial);
   }
-  opti.set_initial(lambda, lambda_initial);
-  opti.set_initial(mu, mu_initial);
 
   casadi::Dict solver_options;
   solver_options["max_iter"] = config.max_iterations;
@@ -395,13 +439,16 @@ OptimizationResult SolveFootprintNlp(
   casadi::Dict plugin_options;
   plugin_options["expand"] = true;
   plugin_options["print_time"] = false;
+  failure_stage = "IPOPT solver initialization";
   opti.solver("ipopt", plugin_options, solver_options);
 
-  const auto begin = std::chrono::steady_clock::now();
-  try {
+  result.model_build_time = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - model_begin).count();
+  failure_stage = "opti.solve()";
+  solve_begin = std::chrono::steady_clock::now();
     const casadi::OptiSol solution = opti.solve();
     result.solve_time = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - begin).count();
+        std::chrono::steady_clock::now() - solve_begin).count();
     const auto stats = solution.stats();
     result.status = GenericToString(stats.at("return_status"));
     result.iterations = static_cast<int>(stats.at("iter_count"));
@@ -410,8 +457,12 @@ OptimizationResult SolveFootprintNlp(
     result.objective = static_cast<double>(solution.value(objective));
     const DM state_value = solution.value(state);
     const DM dt_value = solution.value(dt);
-    const DM lambda_value = solution.value(lambda);
-    const DM mu_value = solution.value(mu);
+    DM lambda_value;
+    DM mu_value;
+    if (obstacle_count > 0) {
+      lambda_value = solution.value(lambda);
+      mu_value = solution.value(mu);
+    }
     result.trajectory.nodes.resize(node_count);
     result.trajectory.intervals.resize(interval_count);
     for (std::size_t i = 0; i < node_count; ++i) {
@@ -532,9 +583,25 @@ OptimizationResult SolveFootprintNlp(
                      result.max_obca_violation <= residual_limit &&
                      result.max_map_boundary_violation <= residual_limit;
   } catch (const std::exception& exception) {
-    result.solve_time = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - begin).count();
-    result.status = exception.what();
+    if (failure_stage != "opti.solve()") {
+      result.model_build_time = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - model_begin).count();
+    }
+    if (failure_stage == "opti.solve()") {
+      result.solve_time = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - solve_begin).count();
+    }
+    result.status = failure_stage + " failed: " + exception.what();
+  } catch (...) {
+    if (failure_stage != "opti.solve()") {
+      result.model_build_time = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - model_begin).count();
+    }
+    if (failure_stage == "opti.solve()") {
+      result.solve_time = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - solve_begin).count();
+    }
+    result.status = failure_stage + " failed: unknown exception";
   }
   return result;
 }
@@ -622,6 +689,11 @@ bool SaveOptimizationResults(const std::string& result_directory,
           << "ipopt_hessian_approximation="
           << result.configured_hessian_approximation << '\n'
           << "ipopt_mu_strategy=" << result.configured_mu_strategy << '\n'
+          << "model_obstacle_count=" << result.model_obstacle_count << '\n'
+          << "model_variable_count=" << result.model_variable_count << '\n'
+          << "model_constraint_count=" << result.model_constraint_count << '\n'
+          << "model_obca_variable_count=" << result.model_obca_variable_count << '\n'
+          << "model_build_time_s=" << result.model_build_time << '\n'
           << "matlab_interface=AMPL_IPOPT\n"
           << "cpp_interface=CasADi_Opti_IPOPT\n";
   return static_cast<bool>(footprints) && static_cast<bool>(summary);
@@ -689,10 +761,12 @@ bool WriteCollisionValidation(
   stream << std::setprecision(12) << std::boolalpha
          << "sampling_frequency_hz=100\n"
          << "sampling_period_s=" << evaluation_dt << '\n'
+         << "obstacle_count=" << obstacles.size() << '\n'
          << "sample_frames=" << frames << '\n'
          << "collision_frames=" << collision_frames << '\n'
          << "collision_ratio="
          << (frames ? static_cast<double>(collision_frames) / frames : 0.0) << '\n'
+         << "minimum_obstacle_distance_available=" << !obstacles.empty() << '\n'
          << "minimum_obstacle_distance_m=" << minimum_obstacle_distance << '\n'
          << "boundary_violation_frames=" << boundary_violation_frames << '\n'
          << "maximum_boundary_violation_m=" << maximum_boundary_violation << '\n'

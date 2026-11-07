@@ -67,6 +67,11 @@ struct OptimizationResult {
   std::string configured_linear_solver;
   std::string configured_hessian_approximation;
   std::string configured_mu_strategy;
+  std::size_t model_variable_count = 0;
+  std::size_t model_constraint_count = 0;
+  std::size_t model_obstacle_count = 0;
+  std::size_t model_obca_variable_count = 0;
+  double model_build_time = 0.0;
 };
 
 }  // namespace optimizer
