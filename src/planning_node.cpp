@@ -265,23 +265,29 @@ class PlanningNode {
   }
 
   void QueueGoal(const Pose2d& goal) const {
-    const common::math::Polygon2d footprint(vehicle_.GenerateBox(
-        common::math::Pose(goal.x, goal.y, goal.yaw)));
+    const auto box = vehicle_.GenerateBox(
+        common::math::Pose(goal.x, goal.y, goal.yaw));
+    const common::math::Polygon2d footprint(box);
     VisualizationPlot::PlotPolygon(footprint, 0.015, Color::Magenta, 0,
                                    "planning_goal_body");
-    const double nose = vehicle_.wheel_base + vehicle_.front_hang;
-    VisualizationPlot::Plot(
-        {goal.x, goal.x + nose * std::cos(goal.yaw)},
-        {goal.y, goal.y + nose * std::sin(goal.yaw)},
-        0.018, Color::Magenta, 0, "planning_goal_heading");
+    const double arrow_length =
+        vehicle_.wheel_base + vehicle_.front_hang + 0.04;
+    VisualizationPlot::PlotArrow(
+        goal.x, goal.y, goal.x + arrow_length * std::cos(goal.yaw),
+        goal.y + arrow_length * std::sin(goal.yaw), Color::Magenta, 0,
+        "planning_goal_heading");
     VisualizationPlot::PlotPoints({goal.x}, {goal.y}, Color::Magenta,
-                                  0.045, 0, "planning_goal_point");
+                                  0.03, 0, "planning_goal_point");
+    VisualizationPlot::PlotText(box.max_x() + 0.07, box.max_y() + 0.07,
+                                "GOAL", 0.08, Color::Magenta, 0,
+                                "planning_goal_label");
   }
 
   void ClearPlanningMarkers() const {
     VisualizationPlot::ClearMarkers("planning_goal_body", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_heading", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_point", 0, 0);
+    VisualizationPlot::ClearMarkers("planning_goal_label", 0, 0);
     VisualizationPlot::ClearMarkers("hybrid_astar_path", 0, 0);
     VisualizationPlot::Trigger();
   }

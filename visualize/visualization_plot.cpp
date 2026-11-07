@@ -38,7 +38,6 @@ VisualizationPlot::Plot(const Vector &xs, const Vector &ys, double width, Color 
     pt.x = xs[i];
     pt.y = ys[i];
     pt.z = 0.03;
-    pt.z = 0.03;
     msg.points.push_back(pt);
   }
 
@@ -66,6 +65,7 @@ void VisualizationPlot::Plot(const VisualizationPlot::Vector &xs, const Visualiz
     geometry_msgs::Point pt;
     pt.x = xs[i];
     pt.y = ys[i];
+    pt.z = 0.03;
     msg.points.push_back(pt);
     msg.colors.push_back(color[i].toColorRGBA());
   }
@@ -174,7 +174,7 @@ void VisualizationPlot::PlotTrajectory(const Vector &xs, const Vector &ys, const
 }
 
 void VisualizationPlot::PlotPoints(const Vector &xs, const Vector &ys, const Color &color, double width, int id,
-                                   const std::string &ns) {
+                                   const std::string &ns, double z) {
   assert(xs.size() == ys.size());
 
   visualization_msgs::Marker msg;
@@ -193,12 +193,46 @@ void VisualizationPlot::PlotPoints(const Vector &xs, const Vector &ys, const Col
     geometry_msgs::Point pt;
     pt.x = xs[i];
     pt.y = ys[i];
+    pt.z = z;
     msg.points.push_back(pt);
   }
 
   mutex_.lock();
   arr_.markers.push_back(msg);
   mutex_.unlock();
+}
+
+void VisualizationPlot::PlotArrow(double start_x, double start_y,
+                                  double end_x, double end_y, Color color,
+                                  int id, const std::string &ns,
+                                  double shaft_diameter,
+                                  double head_diameter, double head_length,
+                                  double z) {
+  visualization_msgs::Marker msg;
+  msg.header.frame_id = frame_;
+  msg.header.stamp = ros::Time();
+  msg.ns = ns;
+  msg.id = id >= 0 ? id : arr_.markers.size();
+  msg.action = visualization_msgs::Marker::ADD;
+  msg.type = visualization_msgs::Marker::ARROW;
+  msg.pose.orientation.w = 1.0;
+  msg.scale.x = shaft_diameter;
+  msg.scale.y = head_diameter;
+  msg.scale.z = head_length;
+  msg.color = color.toColorRGBA();
+
+  geometry_msgs::Point start;
+  start.x = start_x;
+  start.y = start_y;
+  start.z = z;
+  geometry_msgs::Point end;
+  end.x = end_x;
+  end.y = end_y;
+  end.z = z;
+  msg.points = {start, end};
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  arr_.markers.push_back(msg);
 }
 
 void VisualizationPlot::PlotText(double x, double y, const std::string &text,

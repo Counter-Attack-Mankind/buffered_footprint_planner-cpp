@@ -44,7 +44,13 @@ void PlotTrajectory(const Vector &xs, const Vector &ys, const Vector &vs, double
                     double width = 0.1, int id = -1, const std::string &ns = "");
 
 void PlotPoints(const Vector &xs, const Vector &ys, const Color &color = Color::White, double width = 0.1,
-                int id = -1, const std::string &ns = "");
+                int id = -1, const std::string &ns = "", double z = 0.04);
+
+void PlotArrow(double start_x, double start_y, double end_x, double end_y,
+               Color color = Color::White, int id = -1,
+               const std::string &ns = "", double shaft_diameter = 0.008,
+               double head_diameter = 0.022, double head_length = 0.025,
+               double z = 0.04);
 
 void PlotText(double x, double y, const std::string &text, double height,
               Color color = Color::Black, int id = -1,

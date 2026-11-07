@@ -130,7 +130,8 @@ class SimulationNode {
   }
 
   void QueueVehicle() const {
-    const common::math::Polygon2d footprint(VehicleBox(vehicle_pose_));
+    const auto box = VehicleBox(vehicle_pose_);
+    const common::math::Polygon2d footprint(box);
     VisualizationPlot::PlotPolygon(footprint, 0.015, Color::Blue, 0,
                                    "simulation_vehicle_body");
     const double nose_distance = vehicle_.wheel_base + vehicle_.front_hang;
@@ -143,26 +144,42 @@ class SimulationNode {
     VisualizationPlot::PlotPoints({vehicle_pose_.x}, {vehicle_pose_.y},
                                   Color::Blue, 0.045, 0,
                                   "simulation_vehicle_rear_axle");
-    VisualizationPlot::PlotText(vehicle_pose_.x, vehicle_pose_.y, vehicle_id_,
-                                0.12, Color::Blue, 0,
+    VisualizationPlot::PlotText(box.max_x() + 0.07, box.max_y() + 0.07,
+                                "vehicle1", 0.08, Color::Blue, 0,
                                 "simulation_vehicle_label");
   }
 
   void QueueLockedStart() const {
-    const common::math::Polygon2d footprint(VehicleBox(locked_start_));
+    const auto box = VehicleBox(locked_start_);
+    const common::math::Polygon2d footprint(box);
     VisualizationPlot::PlotPolygon(footprint, 0.012, Color::Green, 0,
                                    "simulation_locked_start");
-    VisualizationPlot::PlotText(locked_start_.x, locked_start_.y,
-                                "START LOCKED", 0.10, Color::Green, 0,
+    VisualizationPlot::PlotPoints({locked_start_.x}, {locked_start_.y},
+                                  Color::Green, 0.03, 0,
+                                  "simulation_locked_start_rear_axle");
+    const double arrow_length =
+        vehicle_.wheel_base + vehicle_.front_hang + 0.04;
+    VisualizationPlot::PlotArrow(
+        locked_start_.x, locked_start_.y,
+        locked_start_.x + arrow_length * std::cos(locked_start_.yaw),
+        locked_start_.y + arrow_length * std::sin(locked_start_.yaw),
+        Color::Green, 0, "simulation_locked_start_heading");
+    const double label_x = (box.min_x() + box.max_x()) / 2.0;
+    const double label_y = box.min_y() - 0.10;
+    VisualizationPlot::PlotText(label_x, label_y, "START LOCKED", 0.08,
+                                Color::Green, 0,
                                 "simulation_locked_start_label");
   }
 
   void ClearTaskMarkers() const {
     VisualizationPlot::ClearMarkers("simulation_locked_start", 0, 0);
+    VisualizationPlot::ClearMarkers("simulation_locked_start_rear_axle", 0, 0);
+    VisualizationPlot::ClearMarkers("simulation_locked_start_heading", 0, 0);
     VisualizationPlot::ClearMarkers("simulation_locked_start_label", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_body", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_heading", 0, 0);
     VisualizationPlot::ClearMarkers("planning_goal_point", 0, 0);
+    VisualizationPlot::ClearMarkers("planning_goal_label", 0, 0);
     VisualizationPlot::ClearMarkers("hybrid_astar_path", 0, 0);
   }
 
@@ -202,6 +219,8 @@ class SimulationNode {
       start_locked_ = false;
       stable_pose_ = vehicle_pose_;
       stable_since_ = ros::Time::now();
+      ClearTaskMarkers();
+      VisualizationPlot::Trigger();
       PublishSceneState();
       ROS_INFO("Editing finished; checking Vehicle 1 stability for %.1f s",
                stationary_duration_);
