@@ -32,7 +32,7 @@ Visualization Manager:
       Value: true
   Enabled: true
   Global Options:
-    Background Color: 220; 220; 220
+    Background Color: 0; 0; 0
     Default Light: true
     Fixed Frame: map
     Frame Rate: 30
@@ -43,6 +43,8 @@ Visualization Manager:
     - Class: rviz/Select
     - Class: rviz/FocusCamera
     - Class: rviz/Measure
+    - Class: rviz/SetGoal
+      Topic: /move_base_simple/goal
   Value: true
   Views:
     Current:

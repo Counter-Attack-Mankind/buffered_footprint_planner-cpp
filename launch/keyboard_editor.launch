@@ -1,0 +1,6 @@
+<launch>
+  <node pkg="buffered_footprint_planner" type="keyboard_scene_editor"
+        name="keyboard_scene_editor" output="screen" required="false">
+    <rosparam command="load" file="$(find buffered_footprint_planner)/config/env.yaml"/>
+  </node>
+</launch>

@@ -7,6 +7,12 @@
     <rosparam command="load" file="$(find buffered_footprint_planner)/config/planner.yaml"/>
   </node>
 
+  <node pkg="buffered_footprint_planner" type="planning_node"
+        name="buffered_footprint_planning" output="screen" required="true">
+    <rosparam command="load" file="$(find buffered_footprint_planner)/config/env.yaml"/>
+    <rosparam command="load" file="$(find buffered_footprint_planner)/config/planner.yaml"/>
+  </node>
+
   <node if="$(arg launch_rviz)" pkg="rviz" type="rviz" name="rviz"
         args="-d $(find buffered_footprint_planner)/config/rviz.rviz"/>
 </launch>

@@ -32,10 +32,10 @@ void PlotPolygon(const Polygon2d &polygon, double width = 0.1, Color color = Col
                  int id = -1, const std::string &ns = "");
 
 void PlotFilledPolygon(const Vector &xs, const Vector &ys, Color color = Color::Grey,
-                       int id = -1, const std::string &ns = "");
+                       int id = -1, const std::string &ns = "", double z = 0.01);
 
 void PlotFilledPolygon(const Polygon2d &polygon, Color color = Color::Grey,
-                       int id = -1, const std::string &ns = "");
+                       int id = -1, const std::string &ns = "", double z = 0.01);
 
 void PlotPath(const Vector &xs, const Vector &ys, const Vector &thetas, double bias = 120.0,
                     double width = 0.1, int id = -1, const std::string &ns = "");

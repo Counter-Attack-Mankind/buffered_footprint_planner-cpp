@@ -1,0 +1,18 @@
+uint8 SET_POSE=0
+uint8 QUERY_POSE=1
+uint8 FINISH_EDITING=2
+uint8 BEGIN_PLANNING=3
+uint8 END_PLANNING=4
+uint8 action
+string object_id
+float64 x
+float64 y
+float64 yaw
+---
+bool success
+string message
+float64 x
+float64 y
+float64 yaw
+bool start_locked
+uint64 scene_revision

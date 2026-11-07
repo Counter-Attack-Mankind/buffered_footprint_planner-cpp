@@ -38,6 +38,7 @@ VisualizationPlot::Plot(const Vector &xs, const Vector &ys, double width, Color 
     pt.x = xs[i];
     pt.y = ys[i];
     pt.z = 0.03;
+    pt.z = 0.03;
     msg.points.push_back(pt);
   }
 
@@ -95,7 +96,7 @@ void VisualizationPlot::PlotPolygon(const Polygon2d &polygon, double width, Colo
 }
 
 void VisualizationPlot::PlotFilledPolygon(const Vector &xs, const Vector &ys, Color color, int id,
-                                          const std::string &ns) {
+                                          const std::string &ns, double z) {
   if (xs.size() < 3) return;  // Need at least 3 points for a polygon
 
   visualization_msgs::Marker msg;
@@ -116,15 +117,15 @@ void VisualizationPlot::PlotFilledPolygon(const Vector &xs, const Vector &ys, Co
     geometry_msgs::Point pt0, pt1, pt2;
     pt0.x = xs[0];
     pt0.y = ys[0];
-    pt0.z = 0.01;
+    pt0.z = z;
 
     pt1.x = xs[i];
     pt1.y = ys[i];
-    pt1.z = 0.01;
+    pt1.z = z;
 
     pt2.x = xs[i + 1];
     pt2.y = ys[i + 1];
-    pt2.z = 0.01;
+    pt2.z = z;
 
     msg.points.push_back(pt0);
     msg.points.push_back(pt1);
@@ -137,13 +138,13 @@ void VisualizationPlot::PlotFilledPolygon(const Vector &xs, const Vector &ys, Co
 }
 
 void VisualizationPlot::PlotFilledPolygon(const Polygon2d &polygon, Color color, int id,
-                                          const std::string &ns) {
+                                          const std::string &ns, double z) {
   std::vector<double> xs, ys;
   for (auto &pt: polygon.points()) {
     xs.push_back(pt.x());
     ys.push_back(pt.y());
   }
-  PlotFilledPolygon(xs, ys, color, id, ns);
+  PlotFilledPolygon(xs, ys, color, id, ns, z);
 }
 
 void VisualizationPlot::PlotPath(const Vector &xs, const Vector &ys, const Vector &thetas, double bias, double width, int id,
@@ -280,7 +281,6 @@ void VisualizationPlot::Trigger() {
   mutex_.lock();
   publisher_.publish(arr_);
   arr_.markers.clear();
-  ros::spinOnce();
   mutex_.unlock();
 }
 

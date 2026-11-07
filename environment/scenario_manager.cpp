@@ -83,6 +83,15 @@ bool ScenarioManager::SetObstaclePose(const std::string& id, double x,
                                       double y, double yaw) {
   for (auto& obstacle : obstacles_) {
     if (obstacle.id == id) {
+      Obstacle candidate = obstacle;
+      candidate.x = x;
+      candidate.y = y;
+      candidate.yaw = yaw;
+      const auto polygon = candidate.polygon();
+      if (polygon.min_x() < bounds_[0] || polygon.max_x() > bounds_[1] ||
+          polygon.min_y() < bounds_[2] || polygon.max_y() > bounds_[3]) {
+        return false;
+      }
       obstacle.x = x;
       obstacle.y = y;
       obstacle.yaw = yaw;

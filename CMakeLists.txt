@@ -7,15 +7,22 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
+  message_generation
   roscpp
   std_msgs
+  tf2
+  tf2_geometry_msgs
   visualization_msgs
 )
+
+add_service_files(FILES SetObjectPose.srv)
+generate_messages()
 
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES common_math common_util hybrid_astar environment visualization_plot
-  CATKIN_DEPENDS geometry_msgs roscpp std_msgs visualization_msgs
+  CATKIN_DEPENDS geometry_msgs message_runtime roscpp std_msgs tf2
+                 tf2_geometry_msgs visualization_msgs
 )
 
 include_directories(
@@ -55,8 +62,18 @@ target_link_libraries(visualization_plot common_math common_util ${catkin_LIBRAR
 
 add_executable(simulation_node src/simulation_node.cpp)
 target_link_libraries(simulation_node environment visualization_plot ${catkin_LIBRARIES})
+add_dependencies(simulation_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
-install(TARGETS common_math common_util hybrid_astar environment visualization_plot simulation_node
+add_executable(planning_node src/planning_node.cpp)
+target_link_libraries(planning_node environment hybrid_astar visualization_plot ${catkin_LIBRARIES})
+add_dependencies(planning_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+add_executable(keyboard_scene_editor simulation/keyboard_scene_editor.cpp)
+target_link_libraries(keyboard_scene_editor ${catkin_LIBRARIES})
+add_dependencies(keyboard_scene_editor ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+install(TARGETS common_math common_util hybrid_astar environment visualization_plot
+                simulation_node planning_node keyboard_scene_editor
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
