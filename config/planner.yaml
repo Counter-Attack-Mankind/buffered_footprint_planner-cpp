@@ -1,0 +1,29 @@
+# Vehicle geometry and limits from condition_ws/src/condition_planner/config/planner.yaml.
+rear_hang: 0.032
+front_hang: 0.036
+wheel_base: 0.143
+length: 0.211
+width: 0.191
+max_velocity: 0.25
+max_reverse_velocity: 0.20
+max_acceleration: 0.1
+max_deceleration: -0.1
+max_phi: 0.3491
+min_phi: -0.3491
+max_omega: 0.1
+
+# Bidirectional Hybrid A* settings.
+xy_grid_resolution: 0.02
+phi_grid_resolution: 0.05
+next_node_num: 20
+step_size: 0.03
+traj_forward_penalty: 1.0
+traj_back_penalty: 1.5
+traj_gear_switch_penalty: 10.0
+traj_steer_penalty: 1.0
+traj_steer_change_penalty: 5.0
+grid_a_star_xy_resolution: 0.03
+delta_t: 0.5
+analytic_expansion_cost: 20.0
+dubins_phi_gamma: 1.1
+explore_node_num: 2000000

@@ -1,0 +1,243 @@
+这是我目前的层级和搬迁的文件。文件目前我还没有进行更改。目前我先要求阶段如下展开:
+阶段1：原始 forward-only Hybrid A 基线。* 目标只有一个：roslaunch buffered_footprint_planner map.launch 后，
+RViz 能正确显示 env.json 中的边界、障碍物、起点、终点以及当前 condition_ws 原版的“只前进”Hybrid A* 路径。
+
+阶段2：把 Hybrid A 改成真正支持前进+倒退。并且正确可视化
+
+阶段3：加入 Scheme1 中“Hybrid A*之后、写入 NLP 初始解之前”的全部处理。 这时候才新增一个 initialization/ 目录。按照 MATLAB 调用链迁移：Hybrid A* path → 去重/θ unwrap → 有效前进倒退段与 cusp 提取 → CalculateTimeStamp → 最短时间速度分配 → 稠密插值 → TimeDistribution → 非均匀配置点选择。最终这一阶段必须产生完整的初值数据结构：x, y, theta, v, a, phi, omega, dt。这里还不需要 CasADi。你应该能在终端或 CSV 中检查每个配置点，而且 RViz 可以额外显示“Hybrid A* 原路径”和“Scheme1 配置点轨迹”。阶段3验收标准是：正负 v 正确、cusp 处速度为 0、dt[k] > 0、所有配置点数量和状态都合理。
+
+阶段4：加入 buffered footprint + OBCA + CasADi NLP。 这个阶段才新建 ef/、obca/、nlp/。顺序也不要反：先把 Scheme1 的 LSE buffered footprint 数值计算实现出来；再实现障碍物 halfspace 和 OBCA warm start；再实现 NLP1.mod 对应的 CasADi NLP；最后把阶段3的 x,y,theta,v,a,phi,omega,dt 作为 x0 送入 IPOPT。第一版不要优化结构，优先和 MATLAB 对齐，s、splus、sminus、kappa、up/down/left/right、corners、lambda、mu、qx、qy 都可以先显式保留。阶段4验收标准是 IPOPT 成功返回，并能输出优化后的 x,y,theta,v,a,phi,omega,dt，同时验证没有明显约束违反。
+
+阶段5：优化结果可视化和动画。
+
+请在当前新建项目 `buffered_footprint_planner` 中完成“阶段1：原版 forward-only Hybrid A* 虚拟环境可视化基线”。
+重要要求：
+- 本阶段只做工程搬迁和最小闭环。
+- 不修改 Hybrid A* 算法逻辑。
+- 不加入倒车支持。
+- 不加入 Scheme1 的 ConvertPathToTraj / TimeDistribution。
+- 不加入 LSE buffered footprint。
+- 不加入 OBCA。
+- 不加入 CasADi / IPOPT。
+- 不接实车。
+- 不接 pure pursuit。
+- 不发布 /chassis、/traj 等实车控制 topic。
+
+本阶段目标：
+
+执行：
+
+roslaunch buffered_footprint_planner map.launch后，能够在 RViz 中正确显示：
+
+1. env.json 中的地图边界 border；
+2. obstacles；
+3. 起点车辆位姿；
+4. 终点车辆位姿；
+5. 当前 condition_ws 原版 forward-only Hybrid A* 搜索得到的路径；
+6. Hybrid A* 路径沿途不能与障碍物碰撞。
+
+请先完整审查当前新项目D:\desktop\buffered_footprint_planner以及D:\desktop\experiment\condition_ws中与阶段1相关的依赖
+重点检查并处理以下内容。
+
+一、工程结构
+
+补齐至少：
+
+- CMakeLists.txt
+- package.xml
+- launch/map.launch
+- src/map_node.cpp 或等价主节点
+- visualize/visualization_plot.cpp
+
+如果 Hybrid A* 编译需要 condition_ws 中 common/math、common/util 或其他基础文件：
+- 只复制实际依赖；
+- 不要复制 LIOM/NLP/控制器/实车相关代码；
+- 优先保持原实现不变；
+- 允许根据新目录结构调整 include 路径和 namespace。
+
+二、环境模块
+
+基于 condition_ws 的 my_env.cpp/h 完成新项目的环境读取。
+
+要求：
+- 从 config/env.json 读取：
+  border
+  obstacles
+  start
+  goal
+- 删除与 trajectory_nlp、LIOM、实车控制无关的依赖；
+- 不要保留旧工程绝对路径；
+- 环境模块只负责保存/读取场景数据；
+- 合法的 start=(0,0,theta) 不能被误判为“未设置”。
+
+三、车辆参数
+
+当前阶段车辆几何和约束参数以：
+
+condition_ws/src/condition_planner/config/planner.yaml
+
+为准。
+
+至少正确读取：
+
+rear_hang
+front_hang
+wheel_base
+length
+width
+max_velocity
+max_reverse_velocity
+max_acceleration
+max_deceleration
+max_phi
+min_phi
+max_omega
+
+注意：
+- 本阶段仍保持原 condition_ws 的 forward-only 行为；
+- 暂时不要修改反向逻辑；
+- 不要使用 MATLAB InitializeParams.m 中的旧大车参数；
+- 不要在代码里重复硬编码一套车辆参数。
+
+四、Hybrid A*
+
+优先复用：
+
+condition_ws/src/condition_planner/hybrid_astar
+
+当前成熟实现。
+
+要求：
+- 本阶段保持原 forward-only；
+- 不删除已有 Reeds-Shepp 基础实现；
+- 不修改搜索代价和搜索拓扑；
+- 不开放 reverse；
+- 不修改 gear 逻辑；
+- 先验证原算法在新工程中可以独立运行。
+
+需要确认：
+- vehicle collision check 仍使用真实车辆几何；
+- obstacle collision check 工作正常；
+- start/goal 能正确传入；
+- 输出路径至少包含 x,y,theta；
+- 规划失败时打印明确原因。
+
+五、可视化
+
+复用 condition_ws 的 visualization_plot.cpp/h。
+
+要求 RViz 中显示：
+- border
+- obstacles
+- start vehicle footprint
+- goal vehicle footprint
+- Hybrid A* path
+
+建议 namespace 分开，例如：
+- Border
+- Obstacles
+- Start
+- Goal
+- HybridAStarPath
+
+Fixed Frame 统一使用 map。
+
+不要在本阶段实现动画。
+
+六、主节点
+
+新建 map_node.cpp 或等价文件。
+
+逻辑必须保持简单：
+
+1. ros::init
+2. 读取 ROS 参数
+3. 加载 planner.yaml
+4. 加载 env.json
+5. 初始化 VisualizationPlot
+6. 显示环境
+7. 调用 Hybrid A*
+8. 若规划成功，显示路径
+9. ros::spin
+
+不要在 node.cpp 中加入任何 NLP、OBCA、EF、实车控制逻辑。
+
+七、launch
+
+创建：
+
+launch/map.launch
+
+至少完成：
+- 启动 planner node
+- 设置 env_file
+- 设置 planner config
+- 启动 RViz
+- 加载 config/rviz.rviz
+
+尽量使用：
+
+$(find buffered_footprint_planner)
+
+禁止绝对路径。
+
+八、CMake / package
+
+根据真实 include/link 依赖补齐。
+
+重点检查：
+- roscpp
+- roslib
+- geometry_msgs
+- visualization_msgs
+- nav_msgs
+- tf
+- Eigen3
+- nlohmann/json（如果现有环境读取需要）
+- common math libraries
+
+本阶段不要引入：
+- CasADi
+- IPOPT
+- HSL
+- sandbox_msgs
+除非 forward-only Hybrid A* 本身确实存在不可去除的直接依赖；如能去除则去除。
+
+九、阶段1验收标准
+
+完成后请实际检查：
+
+1. catkin_make 可以通过；
+2. roslaunch buffered_footprint_planner map.launch 可以启动；
+3. RViz 中能看到边界、障碍物、起点、终点；
+4. Hybrid A* 成功输出一条只前进路径；
+5. 路径不会穿过障碍物；
+6. start/goal vehicle footprint 尺寸与 planner.yaml 一致；
+7. 所有路径均使用新项目目录，不依赖 condition_ws/build 或 condition_ws/devel；
+8. 不存在 /home/xxx 或旧 workspace 的绝对路径；
+9. 没有引入 Scheme1、EF、OBCA、NLP、控制器代码。
+
+十、输出方式
+
+完成后不要继续做阶段2。
+
+请给我：
+
+1. 实际修改/新增的文件列表；
+2. 每个文件的职责；
+3. 从 condition_ws 复用了哪些文件；
+4. 哪些文件只是修改 include/路径；
+5. 哪些地方为了新工程做了实质性改动；
+6. catkin_make 是否通过；
+7. roslaunch 是否通过；
+8. Hybrid A* 是否成功；
+9. RViz 预期显示哪些 marker/topic；
+10. 当前还存在的 warning 或已知问题。
+
+如果遇到编译错误：
+- 必须沿 include/link 依赖全链排查；
+- 不要只修报错的单个文件；
+- 不要为了“快速通过”删除 Hybrid A* 核心功能。
+
+本轮只完成 Stage 1。
+不要擅自开始 Stage 2。
